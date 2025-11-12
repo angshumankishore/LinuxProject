@@ -1,114 +1,89 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <elf.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 
-// Define roles
-typedef enum {
-    ROLE_VIEWER,
-    ROLE_EDITOR,
-    ROLE_ADMIN
-} Role;
-
-// Define user structure
-typedef struct {
-    char username[20];
-    char password[20];
-    Role role;
-} User;
-
-// Predefined users
-User users[] = {
-    {"alice", "1234", ROLE_VIEWER},
-    {"bob", "abcd", ROLE_EDITOR},
-    {"admin", "admin", ROLE_ADMIN}
-};
-
-int total_users = 3;
-
-// Function to get role name
-const char* getRoleName(Role role) {
-    switch (role) {
-        case ROLE_VIEWER: return "Viewer";
-        case ROLE_EDITOR: return "Editor";
-        case ROLE_ADMIN:  return "Admin";
-        default: return "Unknown";
+void list_needed_libraries(const char *filename) {
+    int fd = open(filename, O_RDONLY);
+    if (fd < 0) {
+        perror("open");
+        return;
     }
-}
 
-// Check credentials
-User* authenticate(char* username, char* password) {
-    for (int i = 0; i < total_users; i++) {
-        if (strcmp(users[i].username, username) == 0 &&
-            strcmp(users[i].password, password) == 0) {
-            return &users[i];
+    struct stat st;
+    if (fstat(fd, &st) < 0) {
+        perror("fstat");
+        close(fd);
+        return;
+    }
+
+    void *map = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map == MAP_FAILED) {
+        perror("mmap");
+        close(fd);
+        return;
+    }
+
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)map;
+    if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0) {
+        fprintf(stderr, "%s is not an ELF file.\n", filename);
+        munmap(map, st.st_size);
+        close(fd);
+        return;
+    }
+
+    Elf64_Phdr *phdr = (Elf64_Phdr *)((char *)map + ehdr->e_phoff);
+    Elf64_Dyn *dynamic = NULL;
+    size_t dyn_size = 0;
+
+    for (int i = 0; i < ehdr->e_phnum; i++) {
+        if (phdr[i].p_type == PT_DYNAMIC) {
+            dynamic = (Elf64_Dyn *)((char *)map + phdr[i].p_offset);
+            dyn_size = phdr[i].p_filesz;
+            break;
         }
     }
-    return NULL;
+
+    if (!dynamic) {
+        fprintf(stderr, "No dynamic section found.\n");
+        munmap(map, st.st_size);
+        close(fd);
+        return;
+    }
+
+    const char *strtab = NULL;
+    for (Elf64_Dyn *d = dynamic; d->d_tag != DT_NULL; ++d) {
+        if (d->d_tag == DT_STRTAB)
+            strtab = (const char *)((char *)map + (uintptr_t)d->d_un.d_ptr);
+    }
+
+    if (!strtab) {
+        fprintf(stderr, "No string table found.\n");
+        munmap(map, st.st_size);
+        close(fd);
+        return;
+    }
+
+    printf("Dependencies for %s:\\n", filename);
+    for (Elf64_Dyn *d = dynamic; d->d_tag != DT_NULL; ++d) {
+        if (d->d_tag == DT_NEEDED)
+            printf("  %s\\n", strtab + d->d_un.d_val);
+    }
+
+    munmap(map, st.st_size);
+    close(fd);
 }
 
-// Actions
-void viewRecords() {
-    printf("✅ Viewing records...\n");
-}
-
-void editRecords() {
-    printf("✏️  Editing records...\n");
-}
-
-void deleteRecords() {
-    printf("🗑️  Deleting records...\n");
-}
-
-int main() {
-    char username[20], password[20];
-    printf("=== Simple RBAC System ===\n");
-    printf("Username: ");
-    scanf("%s", username);
-    printf("Password: ");
-    scanf("%s", password);
-
-    User* user = authenticate(username, password);
-    if (!user) {
-        printf("❌ Invalid credentials.\n");
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s <binary>\\n", argv[0]);
         return 1;
     }
 
-    printf("\nWelcome, %s! Your role: %s\n\n", user->username, getRoleName(user->role));
-
-    int choice;
-    while (1) {
-        printf("Choose an action:\n");
-        printf("1. View records\n");
-        printf("2. Edit records\n");
-        printf("3. Delete records\n");
-        printf("4. Logout\n");
-        printf("Enter choice: ");
-        scanf("%d", &choice);
-
-        switch (choice) {
-            case 1:
-                viewRecords();
-                break;
-            case 2:
-                if (user->role == ROLE_EDITOR || user->role == ROLE_ADMIN)
-                    editRecords();
-                else
-                    printf("🚫 Access denied: Editors or Admins only.\n");
-                break;
-            case 3:
-                if (user->role == ROLE_ADMIN)
-                    deleteRecords();
-                else
-                    printf("🚫 Access denied: Admins only.\n");
-                break;
-            case 4:
-                printf("👋 Logged out. Goodbye!\n");
-                return 0;
-            default:
-                printf("Invalid choice.\n");
-        }
-        printf("\n");
-    }
-
+    list_needed_libraries(argv[1]);
     return 0;
 }
-
